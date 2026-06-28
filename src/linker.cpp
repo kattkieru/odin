@@ -140,22 +140,36 @@ gb_internal i32 linker_stage(LinkerData *gen) {
 			is_android = true;
 			goto try_cross_linking;
 		default:
+			// NOTE: Cross-OS targeting `windows_amd64` (PE/COFF) is host
+			// decoupled and routes to the Windows link path.
+			if (build_context.metrics.os == TargetOs_windows) {
+				is_cross_linking = true;
+				goto try_cross_linking;
+			}
 			gb_printf_err("Linking for cross compilation for this platform is not yet supported (%.*s %.*s)\n",
 				LIT(target_os_names[build_context.metrics.os]),
 				LIT(target_arch_names[build_context.metrics.arch])
 			);
 			build_context.keep_object_files = true;
+			// NOTE: Signal failure so scripts/CI see a non-zero exit code for an
+			// unsupported cross-link combination (upstream issue #4821). Without
+			// this, `result` stays 0 and the build is reported as successful.
+			result = 1;
 			break;
 		}
 	} else {
 try_cross_linking:;
 
+		// NOTE: The Windows (PE/COFF) link path is selected by the *target* OS,
+		// not the host. This lets a non-Windows host (e.g. Linux) targeting
+		// `windows_amd64` enter the PE/COFF branch. The actual linker invocation
+		// (`link.exe`/`lld-link`) is still host-bound below.
+		bool is_windows = build_context.metrics.os == TargetOs_windows;
+
 	#if defined(GB_SYSTEM_WINDOWS)
 		String section_name = str_lit("msvc-link");
-		bool is_windows = build_context.metrics.os == TargetOs_windows;
 	#else
 		String section_name = str_lit("lld-link");
-		bool is_windows = false;
 	#endif
 
 		bool is_osx = build_context.metrics.os == TargetOs_darwin;
@@ -177,6 +191,175 @@ try_cross_linking:;
 
 
 		if (is_windows) {
+		#if !defined(GB_SYSTEM_WINDOWS)
+			// Linux/Unix host -> windows_amd64: use the bundled lld-link.
+			{
+				timings_start_section(timings, section_name);
+
+				// Quote paths and normalize host separators for lld-link.
+				auto append_posix_path = [](gbString out, String path) -> gbString {
+					out = gb_string_append_length(out, "\"", 1);
+					for (isize i = 0; i < path.len; i++) {
+						char c = cast(char)path[i];
+						if (c == '\\') {
+							c = '/';
+						}
+						out = gb_string_append_length(out, &c, 1);
+					}
+					out = gb_string_append_length(out, "\"", 1);
+					return out;
+				};
+
+				// Locate lld-link and the bundled runtime libraries.
+				Cross_Windows_Paths cross_paths = resolve_bundled_windows_cross_paths();
+
+				// Bundled linker binary path (POSIX, quoted).
+				gbString linker_path = gb_string_make(heap_allocator(), "");
+				defer (gb_string_free(linker_path));
+				linker_path = append_posix_path(linker_path, cross_paths.lld_link);
+
+				// Object inputs (POSIX, quoted, space-separated).
+				gbString object_files = gb_string_make(heap_allocator(), "");
+				defer (gb_string_free(object_files));
+				for (String const &object_path : gen->output_object_paths) {
+					object_files = append_posix_path(object_files, object_path);
+					object_files = gb_string_append_length(object_files, " ", 1);
+				}
+
+				// Output path for `/OUT:` (POSIX, quoted).
+				gbString out_path = gb_string_make(heap_allocator(), "");
+				defer (gb_string_free(out_path));
+				out_path = append_posix_path(out_path, output_filename);
+
+				// Compiler-rt builtins for the freestanding Windows runtime.
+				gbString compiler_rt = gb_string_make(heap_allocator(), "");
+				defer (gb_string_free(compiler_rt));
+				compiler_rt = append_posix_path(compiler_rt, cross_paths.compiler_rt);
+
+				// Search bundled import libraries and an optional sysroot.
+				gbString lib_paths = gb_string_make(heap_allocator(), "");
+				defer (gb_string_free(lib_paths));
+				lib_paths = gb_string_append_length(lib_paths, "/LIBPATH:", 9);
+				lib_paths = append_posix_path(lib_paths, cross_paths.lib_dir);
+				if (cross_paths.sysroot_lib_dir.len > 0) {
+					lib_paths = gb_string_append_length(lib_paths, " /LIBPATH:", 10);
+					lib_paths = append_posix_path(lib_paths, cross_paths.sysroot_lib_dir);
+				}
+
+				// The cross linker uses the selected subsystem without the MSVC CRT.
+				gbString link_settings = gb_string_make(heap_allocator(), "");
+				defer (gb_string_free(link_settings));
+				link_settings = gb_string_append_fmt(link_settings, "/subsystem:%.*s",
+					LIT(windows_subsystem_names[build_context.ODIN_WINDOWS_SUBSYSTEM]));
+				if (build_context.build_mode != BuildMode_StaticLibrary) {
+					link_settings = gb_string_append_fmt(link_settings, " /nodefaultlib");
+				}
+
+				// Select Odin's freestanding entry point for executables.
+				if (build_context.build_mode == BuildMode_DynamicLibrary) {
+					link_settings = gb_string_append_fmt(link_settings, " /DLL");
+					if (build_context.no_entry_point) {
+						link_settings = gb_string_append_fmt(link_settings, " /NOENTRY");
+					}
+				} else if (build_context.build_mode != BuildMode_StaticLibrary) {
+					link_settings = gb_string_append_fmt(link_settings, " /ENTRY:mainCRTStartup");
+				}
+
+				// Emit foreign libraries as positional lld-link arguments.
+				// Bare `system:` imports resolve from the bundled library directories;
+				// path-style imports remain absolute paths. UCRT is linked only when
+				// explicitly imported. Assembly foreign inputs are skipped.
+				gbString foreign_libs = gb_string_make(heap_allocator(), "");
+				defer (gb_string_free(foreign_libs));
+				{
+					// Also search the optional sysroot for `system:` imports.
+					auto system_lib_is_bundled = [&](String lib) -> bool {
+						String candidate = concatenate3_strings(temporary_allocator(),
+							cross_paths.lib_dir, str_lit("/"), lib);
+						if (gb_file_exists((char const *)candidate.text)) {
+							return true;
+						}
+						if (cross_paths.sysroot_lib_dir.len > 0) {
+							String sysroot_candidate = concatenate3_strings(temporary_allocator(),
+								cross_paths.sysroot_lib_dir, str_lit("/"), lib);
+							if (gb_file_exists((char const *)sysroot_candidate.text)) {
+								return true;
+							}
+						}
+						return false;
+					};
+
+					StringSet min_libs_set = {};
+					string_set_init(&min_libs_set, 64);
+					defer (string_set_destroy(&min_libs_set));
+
+					String prev_lib = {};
+					for (Entity *e : gen->foreign_libraries) {
+						GB_ASSERT(e->kind == Entity_LibraryName);
+						// Preserve foreign-block linker flags.
+						String extra_linker_flags = string_trim_whitespace(e->LibraryName.extra_linker_flags);
+						if (extra_linker_flags.len != 0) {
+							foreign_libs = gb_string_append_fmt(foreign_libs, " %.*s", LIT(extra_linker_flags));
+						}
+						for_array(i, e->LibraryName.paths) {
+							String lib = string_trim_whitespace(e->LibraryName.paths[i]);
+							if (lib.len == 0 || has_asm_extension(lib)) {
+								continue;
+							}
+
+							// `system:` imports are bare names; path-style imports are not.
+							bool is_system_lib = !string_contains_char(lib, '/') &&
+							                     !string_contains_char(lib, '\\');
+							if (is_system_lib) {
+								// Match PE's case-insensitive library lookup.
+								string_to_lower(&lib);
+							}
+
+							if (!string_set_update(&min_libs_set, lib) ||
+							    !build_context.min_link_libs) {
+								if (prev_lib != lib) {
+									if (is_system_lib && !system_lib_is_bundled(lib)) {
+										gb_printf_err(
+											"warning: foreign import 'system:%.*s' is not among the bundled "
+											"Windows cross import libraries in '%.*s'.\n"
+											"\tThe link will fail to resolve its symbols unless the lib is "
+											"supplied via '-windows-sysroot:<dir>' or '-extra-linker-flags'.\n"
+											"\tBundled libs are generated from 'bin/windows-cross/def/'; see "
+											"'bin/windows-cross/lib/generate-import-libs.sh' to add one.\n",
+											LIT(lib), LIT(cross_paths.lib_dir));
+									}
+									foreign_libs = gb_string_append_length(foreign_libs, " ", 1);
+									foreign_libs = append_posix_path(foreign_libs, lib);
+								}
+								prev_lib = lib;
+							}
+						}
+					}
+				}
+
+				result = system_exec_command_line_app("cross-lld-link",
+					"%s %s /OUT:%s "
+					"%s "
+					"%s "
+					"%s "
+					"%s "
+					"%.*s "
+					"%.*s "
+					"",
+					linker_path, object_files, out_path,
+					compiler_rt,
+					lib_paths,
+					foreign_libs,
+					link_settings,
+					LIT(build_context.link_flags),
+					LIT(build_context.extra_linker_flags)
+				);
+
+				// Surface lld-link's exit code as the link result.
+				return result;
+			}
+		#endif
+
 			timings_start_section(timings, section_name);
 
 			gbString lib_str = gb_string_make(heap_allocator(), "");

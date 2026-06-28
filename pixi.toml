@@ -1,0 +1,36 @@
+[workspace]
+channels = ["conda-forge"]
+name = "odin"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+# Provision the bundled Linux -> windows_amd64 cross-link toolchain into
+# bin/windows-cross/ (lld-link binary + generated import libraries +
+# compiler-rt builtins). Idempotent; downloads compiler-rt source on first run.
+provision-cross = "bin/windows-cross/provision.sh"
+
+# Build the Odin compiler (./odin) after provisioning the cross toolchain, then
+# print how to build Windows binaries. Skips the build if ./odin already exists.
+build-odin = { cmd = '''bash -c 'test -x ./odin || ./build_odin.sh release; echo; echo "============================================================"; echo "Build complete. The Odin compiler is:  ./odin"; echo; echo "To build a Windows (windows_amd64) executable on this Linux host, run:"; echo "    ./odin build <package-dir> -target:windows_amd64"; echo; echo "The bundled cross-link toolchain lives in bin/windows-cross/."; echo "For DLL-backed vendor libraries (raylib, SDL3, GLFW, ...), copy the"; echo "required runtime DLL(s) next to the produced .exe before running it."; echo "============================================================"' ''', depends-on = ["provision-cross"] }
+
+# Cross-build each vendor demo (Linux host -> windows_amd64) and install the
+# .exe + its runtime DLLs (and any assets) into bin/, ready to copy to a Windows
+# box and run from there. Demo exes land at bin/<lib>_demo.exe, DLLs in bin/,
+# and runtime assets in bin/assets/. Each depends on build-odin, so a fresh
+# checkout self-bootstraps (provision toolchain -> build compiler -> build demo).
+test-cgltf = { cmd = "./odin build tests/cross/vendor/cgltf -out:bin/cgltf_demo.exe -target:windows_amd64 && mkdir -p bin/assets && cp tests/cross/vendor/cgltf/assets/box.gltf bin/assets/box.gltf && tests/cross/vendor/stage-dlls.sh cgltf bin && echo '-> bin/cgltf_demo.exe (run from bin/; loads assets/box.gltf or a path arg)'", depends-on = ["build-odin"] }
+test-sdl3 = { cmd = "./odin build tests/cross/vendor/sdl3 -out:bin/sdl3_demo.exe -target:windows_amd64 && tests/cross/vendor/stage-dlls.sh sdl3 bin && echo '-> bin/sdl3_demo.exe (+ bin/SDL3.dll)'", depends-on = ["build-odin"] }
+test-glfw = { cmd = "./odin build tests/cross/vendor/glfw -out:bin/glfw_demo.exe -target:windows_amd64 -define:GLFW_SHARED=true && tests/cross/vendor/stage-dlls.sh glfw bin && echo '-> bin/glfw_demo.exe (+ bin/glfw3.dll)'", depends-on = ["build-odin"] }
+test-raylib = { cmd = "./odin build tests/cross/vendor/raylib -out:bin/raylib_demo.exe -target:windows_amd64 -define:RAYLIB_SHARED=true && mkdir -p bin/assets && cp tests/cross/vendor/raylib/assets/icon.png bin/assets/icon.png && cp tests/cross/vendor/raylib/assets/blip.wav bin/assets/blip.wav && tests/cross/vendor/stage-dlls.sh raylib bin && echo '-> bin/raylib_demo.exe (+ bin/raylib.dll, bin/assets/)'", depends-on = ["build-odin"] }
+test-box2d = { cmd = "./odin build tests/cross/vendor/box2d -out:bin/box2d_demo.exe -target:windows_amd64 -define:RAYLIB_SHARED=true -define:VENDOR_BOX2D_ENABLE_AVX2=false && tests/cross/vendor/stage-dlls.sh box2d bin && echo '-> bin/box2d_demo.exe (+ bin/raylib.dll)'", depends-on = ["build-odin"] }
+# Build + install all vendor demos (exe + DLLs + assets) into bin/.
+cross-tests = { depends-on = ["test-cgltf", "test-sdl3", "test-glfw", "test-raylib", "test-box2d"] }
+
+[dependencies]
+cmake = ">=4.3.4,<5"
+ninja = ">=1.13.2,<2"
+llvmdev = "20.*"
+clangxx = "20.*"
+lld = "20.*"
+llvm-tools = "20.*"

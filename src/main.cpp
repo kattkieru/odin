@@ -381,6 +381,7 @@ enum BuildFlagKind {
 	BuildFlag_IgnoreUnknownAttributes,
 	BuildFlag_ExtraLinkerFlags,
 	BuildFlag_ExtraAssemblerFlags,
+	BuildFlag_WindowsSysroot,
 	BuildFlag_Microarch,
 	BuildFlag_TargetFeatures,
 	BuildFlag_StrictTargetFeatures,
@@ -454,8 +455,8 @@ enum BuildFlagKind {
 	BuildFlag_IgnoreVsSearch,
 	BuildFlag_ResourceFile,
 	BuildFlag_WindowsPdbName,
-	BuildFlag_Subsystem,
 #endif
+	BuildFlag_Subsystem, // host-independent: also used by the Linux->Windows cross link
 
 	BuildFlag_AndroidKeystore,
 	BuildFlag_AndroidKeystoreAlias,
@@ -621,6 +622,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_IgnoreUnknownAttributes, str_lit("ignore-unknown-attributes"), BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_ExtraLinkerFlags,        str_lit("extra-linker-flags"),        BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_ExtraAssemblerFlags,     str_lit("extra-assembler-flags"),     BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_WindowsSysroot,          str_lit("windows-sysroot"),           BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_Microarch,               str_lit("microarch"),                 BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_TargetFeatures,          str_lit("target-features"),           BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_StrictTargetFeatures,    str_lit("strict-target-features"),    BuildFlagParam_None,    Command__does_build);
@@ -694,8 +696,12 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_IgnoreVsSearch,          str_lit("ignore-vs-search"),          BuildFlagParam_None,    Command__does_build);
 	add_flag(&build_flags, BuildFlag_ResourceFile,            str_lit("resource"),                  BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_WindowsPdbName,          str_lit("pdb-name"),                  BuildFlagParam_String,  Command__does_build);
-	add_flag(&build_flags, BuildFlag_Subsystem,               str_lit("subsystem"),                 BuildFlagParam_String,  Command__does_build);
 #endif
+	// NOTE: `-subsystem` selects the PE/COFF subsystem (`/subsystem:console|windows`).
+	// It only affects Windows targets, but is registered unconditionally so the
+	// Linux->Windows cross link path (src/linker.cpp) can honor a user-selected
+	// subsystem; it is not gated behind `GB_SYSTEM_WINDOWS`.
+	add_flag(&build_flags, BuildFlag_Subsystem,               str_lit("subsystem"),                 BuildFlagParam_String,  Command__does_build);
 
 	add_flag(&build_flags, BuildFlag_AndroidKeystore,         str_lit("android-keystore"),          BuildFlagParam_String,  Command_bundle_android);
 	add_flag(&build_flags, BuildFlag_AndroidKeystoreAlias,    str_lit("android-keystore-alias"),    BuildFlagParam_String,  Command_bundle_android);
@@ -1436,6 +1442,10 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							GB_ASSERT(value.kind == ExactValue_String);
 							build_context.extra_assembler_flags = value.value_string;
 							break;
+						case BuildFlag_WindowsSysroot:
+							GB_ASSERT(value.kind == ExactValue_String);
+							build_context.windows_sysroot = value.value_string;
+							break;
 						case BuildFlag_Microarch: {
 							GB_ASSERT(value.kind == ExactValue_String);
 							build_context.microarch = value.value_string;
@@ -1827,6 +1837,13 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							break;
 						}
 
+					#endif
+
+						// NOTE: `-subsystem` is host-independent (it only touches
+						// `ODIN_WINDOWS_SUBSYSTEM`, consumed by the Windows link paths,
+						// including the Linux->Windows cross path). Kept OUTSIDE the
+						// `GB_SYSTEM_WINDOWS` block above so the cross build can select
+						// `/subsystem:console|windows`.
 						case BuildFlag_Subsystem: {
 							// TODO(Jeroen): Parse optional "[,major[.minor]]"
 
@@ -1869,7 +1886,6 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							}
 							break;
 						}
-					#endif
 
 						case BuildFlag_AndroidKeystore:
 							GB_ASSERT(value.kind == ExactValue_String);
@@ -2869,6 +2885,12 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		if (print_flag("-extra-linker-flags:<string>")) {
 		print_usage_line(2, "Adds extra linker specific flags in a string.");
 		}
+
+		if (print_flag("-windows-sysroot:<path>")) {
+		print_usage_line(2, "Overrides the library search path used when cross-compiling for Windows from a non-Windows host.");
+		print_usage_line(2, "Points the linker at an alternative MSVC-style sysroot of libraries (added as an extra /LIBPATH:).");
+		print_usage_line(2, "Optional: the default offline cross-build resolves the bundled libraries with no flags.");
+		}
 	}
 
 	if (check) {
@@ -3189,15 +3211,13 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "This enforces that all generated code uses features supported by the combination of -target, -microarch, and -target-features.");
 		}
 
-	#if defined(GB_SYSTEM_WINDOWS)
 		if (print_flag("-subsystem:<option>")) {
-			print_usage_line(2, "[Windows only]");
+			print_usage_line(2, "[Windows targets only]");
 			print_usage_line(2, "Defines the subsystem for the application.");
 			print_usage_line(2, "Available options:");
 				print_usage_line(3, "-subsystem:console");
 				print_usage_line(3, "-subsystem:windows");
 		}
-	#endif
 	}
 
 	if (build) {

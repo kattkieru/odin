@@ -1,0 +1,5 @@
+# Runtime DLLs to stage next to the box2d demo .exe (repo-relative source paths).
+# Read by ../stage-dlls.sh. See ../README.md.
+# box2d itself is a STATIC lib (no DLL); this demo renders with shared raylib,
+# so raylib.dll is the only runtime DLL it needs.
+vendor/raylib/windows/raylib.dll

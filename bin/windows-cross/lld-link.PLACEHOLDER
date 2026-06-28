@@ -1,0 +1,13 @@
+PLACEHOLDER - not the real linker.
+
+The real Linux-hosted `lld-link` (LLVM PE/COFF linker) belongs next to this
+file as `bin/windows-cross/lld-link` (no extension, executable). The prebuilt
+binary is not stored in the repository.
+
+To provision it, follow "How to (re)provision the binary" in README.md, then
+delete this placeholder.
+
+Expected after provisioning:
+    bin/windows-cross/lld-link            (executable, +x)
+    bin/windows-cross/LICENSE.TXT
+    bin/windows-cross/README.md

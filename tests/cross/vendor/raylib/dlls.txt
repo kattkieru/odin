@@ -1,0 +1,3 @@
+# Runtime DLLs to stage next to the raylib demo .exe (repo-relative source paths).
+# Read by ../stage-dlls.sh. See ../README.md.
+vendor/raylib/windows/raylib.dll

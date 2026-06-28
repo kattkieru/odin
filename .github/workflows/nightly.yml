@@ -61,11 +61,54 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src $DOCKER_IMAGE sh -c '
             apk add --no-cache \
-              musl-dev llvm20-dev clang20 build-base git mold lz4 \
+              musl-dev llvm20-dev clang20 lld bash build-base git mold lz4 \
               libxml2-static llvm20-static zlib-static zstd-static \
               make &&
             git config --global --add safe.directory /src &&
-            ./ci/build_linux_static.sh
+            ./ci/build_linux_static.sh &&
+            # Provision the Linux-hosted PE/COFF linker into the bundle so the
+            # cross link path (and the vendor-demo compile check below)
+            # works. lld-link is a multi-call alias of the lld driver; the lld
+            # package ships it as a symlink to /usr/bin/lld, so copy the resolved
+            # binary to the bundled path the compiler looks for
+            # ($ODIN_ROOT/bin/windows-cross/lld-link). lld is multi-call: invoked
+            # as "lld-link" (by file name) it dispatches the PE/COFF driver, so
+            # copying either the lld-link alias or the lld driver to that name
+            # works. It is a Linux-host binary (not a *.exe/*.dll/*.lib), so
+            # ci/remove_windows_binaries.sh keeps it and it ships in the Linux
+            # distribution exactly as the bundle README intends.
+            cp -L "$(command -v lld-link || command -v lld)" ./bin/windows-cross/lld-link &&
+            chmod +x ./bin/windows-cross/lld-link &&
+            # Pre-generate the windows_amd64 import libs (kernel32.lib,
+            # ucrtbase.lib, bcrypt.lib, ntdll.lib, plus the vendor-demo set
+            # user32/gdi32/shell32/winmm/opengl32.lib) from the vendored .def
+            # files using the in-container llvm-dlltool, so the Linux distribution
+            # ships ready-made .lib files and the user machine needs no
+            # dlltool/MSVC SDK. bcrypt (BCryptGenRandom) and ntdll (RtlGetVersion)
+            # are required for a flag-free default core:sys/windows cross link;
+            # user32/gdi32/shell32/winmm are pulled by vendor:raylib/vendor:glfw
+            # windowing/GDI/shell/timing (opengl32 bundled for future GL demos).
+            # The script is list-driven, so this one invocation produces all of
+            # them. amd64 only: these are windows_amd64 import libs regardless of
+            # the host arch.
+            DLLTOOL=llvm-dlltool ./bin/windows-cross/lib/generate-import-libs.sh &&
+            # Build the windows_amd64 compiler-rt builtins archive
+            # (libclang_rt.builtins-x86_64.a) from the upstream compiler-rt
+            # source with the in-container clang, so the cross link can resolve
+            # LLVM runtime builtins (__chkstk, __udivti3, __multi3, ...) with no
+            # MSVC CRT. Pinned to the same LLVM major as everything else.
+            apk add --no-cache curl xz &&
+            CLANG=clang LLVM_AR=llvm-ar ./bin/windows-cross/lib/generate-compiler-rt.sh &&
+            # Positive cross compile/link check:
+            # cross-build every vendor demo (cgltf, sdl3, glfw, raylib, box2d)
+            # for windows_amd64 from this Linux host against the just-generated
+            # import libs + compiler-rt, and structurally validate each .exe
+            # (PE32+, console, expected imported DLLs, no static MSVC CRT) with
+            # the in-container llvm-readobj. Runs ALONGSIDE the existing
+            # native-link regression / check_all windows-cross guardrails, not
+            # replacing them. bin/windows-cross/lld-link is found automatically
+            # by the compiler from $ODIN_ROOT.
+            ODIN=./odin LLVM_READOBJ=llvm-readobj bash tests/cross/vendor/check-vendor-demos.sh
           '
       - name: Odin run
         run: ./odin run examples/demo
@@ -80,6 +123,9 @@ jobs:
           cp -r core $FILE
           cp -r vendor $FILE
           cp -r examples $FILE
+          # Bundle bin/ so the Linux-hosted cross linker (bin/windows-cross/lld-link)
+          # ships in the distribution; Windows-only binaries are stripped below.
+          cp -r bin $FILE
           ./ci/remove_windows_binaries.sh $FILE
           # Creating a tarball so executable permissions are retained, see https://github.com/actions/upload-artifact/issues/38
           tar -czvf dist.tar.gz $FILE

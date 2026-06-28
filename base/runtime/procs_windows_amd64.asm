@@ -1,12 +1,11 @@
 bits 64
 
 global __chkstk
-global _tls_index
-global _fltused
 
-section .data
-	_tls_index: dd 0
-	_fltused:   dd 0x9875
+; NOTE: `_tls_index` and `_fltused` used to be defined here, but they are plain
+; data symbols that do not need assembly. They are now defined in pure Odin in
+; `procs_windows_amd64.odin` so they are emitted on every target, including the
+; Linux->Windows cross path where this `.asm` file cannot be assembled (no nasm).
 
 section .text
 ; NOTE(flysand): The function call to __chkstk is called

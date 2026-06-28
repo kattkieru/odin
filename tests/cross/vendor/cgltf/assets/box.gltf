@@ -1,0 +1,102 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "odin-cross cgltf demo (hand-authored tiny sample)"
+  },
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "MainScene",
+      "nodes": [0]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "TriangleNode",
+      "mesh": 0,
+      "translation": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": [1.0, 1.0, 1.0]
+    }
+  ],
+  "meshes": [
+    {
+      "name": "TriangleMesh",
+      "primitives": [
+        {
+          "mode": 4,
+          "attributes": { "POSITION": 0 },
+          "indices": 1,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "RedMaterial",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [0.8, 0.1, 0.1, 1.0],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.5
+      }
+    }
+  ],
+  "accessors": [
+    {
+      "name": "positions",
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "min": [0.0, 0.0, 0.0],
+      "max": [1.0, 1.0, 0.0]
+    },
+    {
+      "name": "indices",
+      "bufferView": 1,
+      "componentType": 5123,
+      "count": 3,
+      "type": "SCALAR"
+    },
+    {
+      "name": "anim_time",
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 1,
+      "type": "SCALAR",
+      "min": [0.0],
+      "max": [0.0]
+    },
+    {
+      "name": "anim_rotation",
+      "bufferView": 3,
+      "componentType": 5126,
+      "count": 1,
+      "type": "VEC4"
+    }
+  ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0,  "byteLength": 36, "target": 34962 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 6,  "target": 34963 },
+    { "buffer": 0, "byteOffset": 44, "byteLength": 4 },
+    { "buffer": 0, "byteOffset": 48, "byteLength": 16 }
+  ],
+  "buffers": [
+    {
+      "byteLength": 64,
+      "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAABAAIAAAAAAAAAAAAAAAAAAAAAAAAAAACAPw=="
+    }
+  ],
+  "animations": [
+    {
+      "name": "SpinAnim",
+      "samplers": [
+        { "input": 2, "output": 3, "interpolation": "LINEAR" }
+      ],
+      "channels": [
+        { "sampler": 0, "target": { "node": 0, "path": "rotation" } }
+      ]
+    }
+  ]
+}

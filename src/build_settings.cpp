@@ -511,6 +511,7 @@ struct BuildContext {
 	bool   has_resource;
 	String link_flags;
 	String extra_linker_flags;
+	String windows_sysroot; // -windows-sysroot:<path> override for the bundled Windows cross-link libraries (optional)
 	String extra_assembler_flags;
 	String microarch;
 	BuildModeKind build_mode;
@@ -1818,6 +1819,15 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 		metrics = cross_target;
 	}
 
+#if !defined(GB_SYSTEM_WINDOWS)
+	// Linux/Unix hosts use the bundled PE/COFF linker for Windows targets.
+	// It links without the MSVC static CRT, so use Odin's freestanding startup
+	// entry point and default this path to `-no-crt`-style linkage.
+	if (metrics->os == TargetOs_windows) {
+		bc->no_crt = true;
+	}
+#endif
+
 	GB_ASSERT(metrics->os != TargetOs_Invalid);
 	GB_ASSERT(metrics->arch != TargetArch_Invalid);
 	GB_ASSERT(metrics->ptr_size > 1);
@@ -2256,6 +2266,92 @@ gb_internal String infer_object_extension_from_build_context() {
 	}
 	return output_extension;
 }
+
+#if !defined(GB_SYSTEM_WINDOWS)
+// Cross_Windows_Paths holds the bundled toolchain/asset locations used when a
+// non-Windows host cross-compiles for a `windows_*` target. On native Windows
+// the equivalent slots are filled by `find_visual_studio_and_windows_sdk()`
+// (COM + registry); this struct is the COM/registry-free analogue, sourced from
+// known distribution-relative paths under `$ODIN_ROOT/bin/windows-cross/`.
+//
+// All members are heap-allocated, NUL-terminated POSIX paths (forward slashes).
+struct Cross_Windows_Paths {
+	String root;            // $ODIN_ROOT/bin/windows-cross
+	String lld_link;        // <root>/lld-link            (the PE/COFF linker)
+	String lib_dir;         // <root>/lib                 (import libs + compiler-rt, lib-search dir)
+	String def_dir;         // <root>/def                 (.def sources)
+	String compiler_rt;     // <root>/lib/libclang_rt.builtins-x86_64.a
+	String sysroot_lib_dir; // -windows-sysroot:<path> override, empty when no override
+};
+
+// resolve_bundled_windows_cross_paths resolves the bundled cross-link assets for
+// a Linux (or other non-Windows) host targeting Windows, without any COM,
+// registry, Windows SDK, or `link.exe` lookup. It mirrors the build-path slots
+// that `find_visual_studio_and_windows_sdk()` fills on Windows, but sources them
+// from the bundled `$ODIN_ROOT/bin/windows-cross/` layout:
+//
+//   bin/windows-cross/lld-link                            (linker tool)
+//   bin/windows-cross/lib/                                (lib search dir)
+//   bin/windows-cross/lib/libclang_rt.builtins-x86_64.a   (compiler-rt)
+//   bin/windows-cross/def/                                (.def sources)
+//
+// Paths are returned regardless of whether the assets exist on disk (the import
+// libs / compiler-rt archive are packaging-time build outputs that may be absent
+// in a source checkout); existence is logged via `debugf` so a missing bundled
+// asset is diagnosable. The actual link still fails loudly later if a required
+// asset is missing.
+//
+// The optional `-windows-sysroot:<path>` flag lets advanced users
+// point the linker at an alternative MSVC-style sysroot of libraries. When set,
+// its path is exposed as `sysroot_lib_dir` (with one trailing separator
+// stripped) and the cross link adds it as an *additional* `/LIBPATH:` entry; it
+// does NOT replace the bundled defaults, so the zero-configuration offline build
+// keeps working unchanged when the flag is absent.
+gb_internal Cross_Windows_Paths resolve_bundled_windows_cross_paths(void) {
+	gbAllocator a = heap_allocator();
+
+	// `ODIN_ROOT` may or may not carry a trailing separator depending on how it
+	// was resolved (Linux `internal_odin_root_dir` keeps a trailing `/`; an
+	// env-supplied `ODIN_ROOT` normalized via `normalize_path` may not), so strip
+	// one trailing `/` or `\` before joining to avoid a doubled separator.
+	String odin_root = build_context.ODIN_ROOT;
+	if (odin_root.len > 0 && (odin_root[odin_root.len-1] == '/' || odin_root[odin_root.len-1] == '\\')) {
+		odin_root.len -= 1;
+	}
+
+	Cross_Windows_Paths paths = {};
+	paths.root        = concatenate_strings(a, odin_root,     str_lit("/bin/windows-cross"));
+	paths.lld_link    = concatenate_strings(a, paths.root,    str_lit("/lld-link"));
+	paths.lib_dir     = concatenate_strings(a, paths.root,    str_lit("/lib"));
+	paths.def_dir     = concatenate_strings(a, paths.root,    str_lit("/def"));
+	paths.compiler_rt = concatenate_strings(a, paths.lib_dir, str_lit("/libclang_rt.builtins-x86_64.a"));
+
+	// Optional override: an extra MSVC-style lib search dir supplied
+	// via `-windows-sysroot:<path>`. Empty when the flag is absent. Strip one
+	// trailing separator for the same reason as `ODIN_ROOT` above, and re-allocate
+	// a NUL-terminated copy so `gb_file_exists`/the linker can consume `.text`
+	// directly (the flag value is not guaranteed NUL-terminated at `.len`).
+	String sysroot = build_context.windows_sysroot;
+	if (sysroot.len > 0) {
+		if (sysroot[sysroot.len-1] == '/' || sysroot[sysroot.len-1] == '\\') {
+			sysroot.len -= 1;
+		}
+		paths.sysroot_lib_dir = concatenate_strings(a, sysroot, str_lit(""));
+	}
+
+	debugf("Cross-compiling for Windows; resolved bundled toolchain (no COM/registry/SDK):\n");
+	debugf("  root:        %.*s%s\n", LIT(paths.root),        gb_file_exists((char const *)paths.root.text)        ? "" : " (missing)");
+	debugf("  lld-link:    %.*s%s\n", LIT(paths.lld_link),    gb_file_exists((char const *)paths.lld_link.text)    ? "" : " (missing)");
+	debugf("  lib dir:     %.*s%s\n", LIT(paths.lib_dir),     gb_file_exists((char const *)paths.lib_dir.text)     ? "" : " (missing)");
+	debugf("  def dir:     %.*s%s\n", LIT(paths.def_dir),     gb_file_exists((char const *)paths.def_dir.text)     ? "" : " (missing)");
+	debugf("  compiler-rt: %.*s%s\n", LIT(paths.compiler_rt), gb_file_exists((char const *)paths.compiler_rt.text) ? "" : " (missing)");
+	if (paths.sysroot_lib_dir.len > 0) {
+		debugf("  sysroot lib: %.*s%s (-windows-sysroot override)\n", LIT(paths.sysroot_lib_dir), gb_file_exists((char const *)paths.sysroot_lib_dir.text) ? "" : " (missing)");
+	}
+
+	return paths;
+}
+#endif
 
 // NOTE(Jeroen): Set/create the output and other paths and report an error as appropriate.
 // We've previously called `parse_build_flags`, so `out_filepath` should be set.
