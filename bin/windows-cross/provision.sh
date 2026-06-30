@@ -35,6 +35,22 @@ else
 	echo "provision: lld-link already present"
 fi
 
+# On macOS the lld-link executable from the Pixi environment depends on
+# libraries beside it (libLLVM, libzstd, etc.). Copying it here leaves its
+# original @loader_path/../lib rpath pointing at bin/lib instead of Pixi's
+# local environment. Keep the copied linker usable from this checkout by
+# adding a workspace-relative rpath. This is intentionally Darwin-only:
+# Linux uses ELF loader metadata and does not need this adjustment.
+if [ "$(uname -s)" = "Darwin" ]; then
+	macos_pixi_lib_rpath='@loader_path/../../.pixi/envs/default/lib'
+	if ! otool -l "$root/lld-link" | grep -F "path $macos_pixi_lib_rpath " >/dev/null; then
+		install_name_tool -add_rpath "$macos_pixi_lib_rpath" "$root/lld-link"
+		echo "provision: added Pixi library rpath to lld-link"
+	else
+		echo "provision: Pixi library rpath already present"
+	fi
+fi
+
 # 2. Import libraries.
 if [ ! -f "$root/lib/kernel32.lib" ]; then
 	sh "$root/lib/generate-import-libs.sh"
